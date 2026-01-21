@@ -13,6 +13,23 @@ A native command-line interface for working with Apple Core ML models on macOS. 
 
 ## Installation
 
+### Homebrew (Recommended)
+
+```bash
+brew tap schappim/coreml-cli
+brew install coreml-cli
+```
+
+### Download Binary
+
+Download the latest release from [GitHub Releases](https://github.com/schappim/coreml-cli/releases):
+
+```bash
+curl -L https://github.com/schappim/coreml-cli/releases/download/v1.0.0/coreml-1.0.0-macos.tar.gz -o coreml.tar.gz
+tar -xzf coreml.tar.gz
+sudo mv coreml /usr/local/bin/
+```
+
 ### Build from Source
 
 Requires macOS 13+ and Swift 5.9+
@@ -21,7 +38,7 @@ Requires macOS 13+ and Swift 5.9+
 git clone https://github.com/schappim/coreml-cli.git
 cd coreml-cli
 swift build -c release
-cp .build/release/coreml /usr/local/bin/
+sudo cp .build/release/coreml /usr/local/bin/
 ```
 
 ### Verify Installation
