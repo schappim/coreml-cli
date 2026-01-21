@@ -299,6 +299,53 @@ coreml benchmark "$MODEL" -i "$INPUT" --device ane -n 50 --json | jq '.meanLaten
     fi
 ```
 
+### JSON Tensor Input
+
+For models that accept numeric tensor inputs (not images), you can pass JSON arrays:
+
+**Create a JSON input file** (`input.json`):
+```json
+[5.1, 3.5, 1.4, 0.2]
+```
+
+**Run prediction:**
+```bash
+coreml predict MyClassifier.mlmodel --input input.json
+```
+
+**Output:**
+```
+Input: input.json
+Inference time: 0.12 ms
+
+Outputs:
+  probabilities: [0.1377, 0.7100, 0.1522]
+```
+
+**Batch process multiple JSON files:**
+```bash
+# Create a directory with JSON input files
+mkdir json_samples
+echo '[5.1, 3.5, 1.4, 0.2]' > json_samples/sample1.json
+echo '[6.7, 3.1, 4.7, 1.5]' > json_samples/sample2.json
+echo '[5.9, 3.0, 5.1, 1.8]' > json_samples/sample3.json
+echo '[4.6, 3.4, 1.4, 0.3]' > json_samples/sample4.json
+
+# Run batch prediction
+coreml batch MyClassifier.mlmodel --dir json_samples --out json_results --format csv
+```
+
+**Output CSV** (`json_results/results.csv`):
+```csv
+input_file,inference_time_ms,probabilities
+sample1.json,0.27,"[0.1377, 0.7100, 0.1522]"
+sample2.json,0.22,"[0.0613, 0.5931, 0.3456]"
+sample3.json,0.29,"[0.0522, 0.5000, 0.4479]"
+sample4.json,0.17,"[0.1406, 0.6825, 0.1769]"
+```
+
+This is useful for models trained on tabular data, embeddings, or any non-image numeric inputs.
+
 ## Requirements
 
 - macOS 13.0 or later
