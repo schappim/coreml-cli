@@ -18,7 +18,7 @@ A native command-line interface for working with Apple Core ML models on macOS. 
 Requires macOS 13+ and Swift 5.9+
 
 ```bash
-git clone https://github.com/yourusername/coreml-cli.git
+git clone https://github.com/schappim/coreml-cli.git
 cd coreml-cli
 swift build -c release
 cp .build/release/coreml /usr/local/bin/
