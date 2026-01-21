@@ -1,0 +1,26 @@
+# Build artifacts
+.build/
+.swiftpm/
+*.xcodeproj
+xcuserdata/
+DerivedData/
+
+# Binary
+coreml
+
+# Test artifacts
+test_images/
+test_results/
+*.mlmodel
+*.mlmodelc
+*.mlpackage
+test_image.jpg
+
+# macOS
+.DS_Store
+*.dSYM
+
+# IDE
+.idea/
+*.swp
+*.swo
