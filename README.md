@@ -215,6 +215,36 @@ Metadata for: MobileNetV2.mlmodel
   Version:     1.0
 ```
 
+### Edit Metadata
+
+Set a metadata field on a `.mlmodel` or `.mlpackage`. The model spec is rewritten
+in place at the protobuf level — no Python or `coremltools` required.
+
+```bash
+coreml meta set MobileNetV2.mlmodel author "Jane Doe"
+coreml meta set MobileNetV2.mlmodel description "Image classifier, ImageNet-1k"
+coreml meta set MobileNetV2.mlmodel license "MIT"
+coreml meta set MobileNetV2.mlmodel version "1.0.1"
+```
+
+Pass an empty string to clear a field:
+
+```bash
+coreml meta set MobileNetV2.mlmodel license ""
+```
+
+Write the result to a different file instead of overwriting the source:
+
+```bash
+coreml meta set MobileNetV2.mlmodel author "Jane" --output MobileNetV2-attributed.mlmodel
+```
+
+For `.mlpackage` inputs, `--output` clones the entire package directory and writes
+the modified spec inside the clone.
+
+Compiled `.mlmodelc` models are read-only — modify the source `.mlmodel` /
+`.mlpackage` and recompile with `coreml compile`.
+
 ## Command Reference
 
 | Command | Description |
@@ -225,6 +255,7 @@ Metadata for: MobileNetV2.mlmodel
 | `coreml benchmark <model> -i <input>` | Benchmark model performance |
 | `coreml compile <model>` | Compile model to optimized format |
 | `coreml meta get <model>` | View model metadata |
+| `coreml meta set <model> <field> <value>` | Set a metadata field (author, description, license, version) |
 
 ### Global Options
 

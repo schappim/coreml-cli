@@ -67,19 +67,19 @@ struct Meta: ParsableCommand {
 
     struct Set: ParsableCommand {
         static let configuration = CommandConfiguration(
-            abstract: "Set metadata on a model (limited support)"
+            abstract: "Set a metadata field on a model"
         )
 
-        @Argument(help: "Metadata field: author, description, license, or version")
-        var field: String
-
-        @Argument(help: "Value to set")
-        var value: String
-
-        @Argument(help: "Path to the Core ML model")
+        @Argument(help: "Path to the Core ML model (.mlmodel or .mlpackage)")
         var modelPath: String
 
-        @Option(name: .shortAndLong, help: "Output path for modified model")
+        @Argument(help: "Field to set: author, description, license, or version")
+        var field: String
+
+        @Argument(help: "New value (pass an empty string to clear the field)")
+        var value: String
+
+        @Option(name: .shortAndLong, help: "Write the modified model to this path instead of overwriting the source")
         var output: String?
 
         func run() throws {
@@ -88,24 +88,17 @@ struct Meta: ParsableCommand {
             }
 
             let manager = MetadataManager()
+            let writtenPath = try manager.setMetadata(
+                modelPath: modelPath,
+                field: metaField,
+                value: value,
+                outputPath: output
+            )
 
-            do {
-                let result = try manager.setMetadata(
-                    modelPath: modelPath,
-                    field: metaField,
-                    value: value,
-                    outputPath: output
-                )
-                print("Metadata updated: \(result)")
-            } catch MetadataError.notImplemented(let reason) {
-                print("Note: \(reason)")
-                print()
-                print("To modify metadata, you can use Python coremltools:")
-                print()
-                print("  import coremltools as ct")
-                print("  model = ct.models.MLModel('\(modelPath)')")
-                print("  model.\(field) = '\(value)'")
-                print("  model.save('\(output ?? modelPath)')")
+            if value.isEmpty {
+                print("Cleared \(metaField.rawValue) in \(writtenPath)")
+            } else {
+                print("Set \(metaField.rawValue) = \"\(value)\" in \(writtenPath)")
             }
         }
     }
