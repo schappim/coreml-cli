@@ -89,6 +89,11 @@ public class ModelPredictor {
     private var modelDescription: MLModelDescription?
     private let device: ComputeDevice
 
+    /// Building a CIContext sets up a GPU pipeline, which costs far more than
+    /// the render itself. One is shared for the predictor's lifetime — CIContext
+    /// is documented as safe to use from multiple threads.
+    private let imageContext = CIContext()
+
     public init(device: ComputeDevice = .all) {
         self.device = device
     }
@@ -352,7 +357,6 @@ public class ModelPredictor {
         }
 
         let ciImage = CIImage(cgImage: cgImage)
-        let context = CIContext()
 
         // Resize image to match constraint
         let scaleX = CGFloat(constraint.pixelsWide) / CGFloat(cgImage.width)
@@ -378,7 +382,7 @@ public class ModelPredictor {
             throw PredictorError.pixelBufferCreationFailed
         }
 
-        context.render(scaledImage, to: buffer)
+        imageContext.render(scaledImage, to: buffer)
 
         return MLFeatureValue(pixelBuffer: buffer)
     }
