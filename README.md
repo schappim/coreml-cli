@@ -6,6 +6,7 @@ A native command-line interface for working with Apple Core ML models on macOS. 
 
 - **Inspect** - View model structure, inputs/outputs, and metadata
 - **Predict** - Run inference on images, text, or JSON data
+- **Serve** - Expose a model as a local HTTP inference API
 - **Batch** - Process multiple files with concurrent execution
 - **Benchmark** - Measure inference latency and throughput
 - **Compile** - Convert `.mlmodel` to optimized `.mlmodelc` format
@@ -110,6 +111,155 @@ coreml predict MobileNetV2.mlmodel --input photo.jpg --device ane  # Apple Neura
 coreml predict MobileNetV2.mlmodel --input photo.jpg --device gpu  # GPU
 coreml predict MobileNetV2.mlmodel --input photo.jpg --device cpu  # CPU only
 ```
+
+### Serve a Model as an HTTP API
+
+Turn any Core ML model into a local REST endpoint. The model is compiled and
+loaded once at startup and stays warm, so requests skip the model-loading cost
+that a fresh `coreml predict` pays every time.
+
+```bash
+coreml serve MobileNetV2.mlmodel
+```
+
+```
+coreml serve — MobileNetV2
+
+  Listening on http://127.0.0.1:8080
+  Device: all · concurrency: 4 · max body: 32 MB
+
+  GET  http://127.0.0.1:8080/health
+  GET  http://127.0.0.1:8080/v1/info
+  POST http://127.0.0.1:8080/v1/predict
+
+  curl -X POST -H "Content-Type: image/jpeg" --data-binary @photo.jpg http://127.0.0.1:8080/v1/predict
+
+Press Ctrl-C to stop.
+```
+
+The banner's `curl` line is generated from the model's own input type, so the
+first request is a copy-paste.
+
+#### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Lists the endpoints, input names, and output names |
+| `GET` | `/health` | Liveness, uptime, and request/prediction/error counters |
+| `GET` | `/v1/info` | Full model description — the JSON `coreml inspect --json` returns |
+| `POST` | `/v1/predict` | Run inference |
+
+#### Sending input
+
+Post an image as raw bytes:
+
+```bash
+curl -X POST -H "Content-Type: image/jpeg" \
+  --data-binary @photo.jpg \
+  "http://127.0.0.1:8080/v1/predict?top=3"
+```
+
+Or as a file upload:
+
+```bash
+curl -X POST -F "file=@photo.jpg" http://127.0.0.1:8080/v1/predict
+```
+
+Response:
+
+```json
+{
+  "model": "MobileNetV2",
+  "inferenceTimeMs": 11.6,
+  "outputs": {
+    "classLabel": "golden retriever",
+    "classLabelProbs": { "golden retriever": 0.8721, "Labrador retriever": 0.0543 }
+  },
+  "ranked": {
+    "classLabelProbs": [
+      { "label": "golden retriever", "score": 0.8721 },
+      { "label": "Labrador retriever", "score": 0.0543 }
+    ]
+  }
+}
+```
+
+`?top=N` trims classifier dictionaries to the N highest scores. Because JSON
+objects carry no ordering, the same results also come back in `ranked` as an
+ordered array.
+
+A tensor model takes a JSON array:
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '[5.1, 3.5, 1.4, 0.2]' \
+  http://127.0.0.1:8080/v1/predict
+```
+
+#### Multi-input models
+
+`coreml predict` feeds one file to the model, so models with several inputs can
+only be driven over HTTP. Name each input:
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"inputs": {"sepal_length": 5.1, "sepal_width": 3.5, "petal_length": 1.4, "petal_width": 0.2}}' \
+  http://127.0.0.1:8080/v1/predict
+```
+
+```json
+{
+  "model": "IrisClassifier",
+  "inferenceTimeMs": 0.13,
+  "outputs": {
+    "species": "setosa",
+    "speciesProbability": { "setosa": 0.9458, "versicolor": 0.0542 }
+  }
+}
+```
+
+Values follow each input's declared type: image inputs take a base64 string,
+multi-array inputs take a (possibly nested) numeric array, and string, double,
+and int64 inputs take their JSON counterparts. A bare `{"input": …}` works when
+the model has exactly one input, and an object already keyed by input name is
+accepted as-is.
+
+Errors name what went wrong rather than failing silently:
+
+```json
+{ "error": { "status": 422, "message": "Missing value for model input 'sepal_width'. Model inputs: petal_length, petal_width, sepal_length, sepal_width" } }
+```
+
+#### Serving beyond localhost
+
+`serve` binds `127.0.0.1` by default, so a model is never exposed to the network
+by accident. To reach it from elsewhere, bind wider and require a key:
+
+```bash
+coreml serve MobileNetV2.mlmodel --host 0.0.0.0 --api-key "$COREML_API_KEY"
+```
+
+```bash
+curl -X POST -H "X-API-Key: $COREML_API_KEY" \
+  -H "Content-Type: image/jpeg" --data-binary @photo.jpg \
+  http://192.168.1.10:8080/v1/predict
+```
+
+The key is accepted as either `X-API-Key` or `Authorization: Bearer`. Pass
+`--cors` to allow calls from a browser page.
+
+#### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--port`, `-p` | `8080` | Port to listen on (`0` picks a free one) |
+| `--host` | `127.0.0.1` | Interface to bind |
+| `--device` | `all` | Compute device: `cpu`, `gpu`, `ane`, or `all` |
+| `--concurrency`, `-c` | `4` | Predictions to run at once |
+| `--max-body-mb` | `32` | Largest request body accepted |
+| `--api-key` | none | Require this key on every request |
+| `--cors` | off | Send CORS headers for browser clients |
+| `--quiet`, `-q` | off | Do not log requests |
 
 ### Batch Processing
 
@@ -251,6 +401,7 @@ Compiled `.mlmodelc` models are read-only — modify the source `.mlmodel` /
 |---------|-------------|
 | `coreml inspect <model>` | Inspect model structure and metadata |
 | `coreml predict <model> -i <input>` | Run inference on a single input |
+| `coreml serve <model>` | Serve the model as a local HTTP API |
 | `coreml batch <model> --dir <dir> --out <dir>` | Batch process multiple inputs |
 | `coreml benchmark <model> -i <input>` | Benchmark model performance |
 | `coreml compile <model>` | Compile model to optimized format |
