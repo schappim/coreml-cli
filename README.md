@@ -26,7 +26,7 @@ brew install coreml-cli
 Download the latest release from [GitHub Releases](https://github.com/schappim/coreml-cli/releases):
 
 ```bash
-curl -L https://github.com/schappim/coreml-cli/releases/download/v1.0.0/coreml-1.0.0-macos.tar.gz -o coreml.tar.gz
+curl -L https://github.com/schappim/coreml-cli/releases/download/v1.1.0/coreml-1.1.0-macos.tar.gz -o coreml.tar.gz
 tar -xzf coreml.tar.gz
 sudo mv coreml /usr/local/bin/
 ```
@@ -46,7 +46,7 @@ sudo cp .build/release/coreml /usr/local/bin/
 
 ```bash
 coreml --version
-# coreml 1.0.0
+# coreml 1.1.0
 ```
 
 ## Usage
