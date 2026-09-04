@@ -225,6 +225,122 @@ final class MetadataManagerTests: XCTestCase {
 
     /// Write a synthetic .mlmodel file containing only a metadata block. The result is
     /// not a runnable CoreML model but it has the wire-format structure the editor expects.
+    // MARK: - setMetadata --output safety
+
+    func testOutputSameAsSourcePackageIsRefused() throws {
+        let packageURL = try writeSyntheticMLPackage(named: "Same", metadata: [.author: "Original"])
+
+        XCTAssertThrowsError(try manager.setMetadata(
+            modelPath: packageURL.path,
+            field: .author,
+            value: "Jane",
+            outputPath: packageURL.path
+        )) { error in
+            guard case .outputSameAsSource = (error as? MetadataError) else {
+                return XCTFail("Expected outputSameAsSource, got \(error)")
+            }
+        }
+
+        // The model must still be there — this used to delete it.
+        let spec = packageURL.appendingPathComponent("Data/com.apple.CoreML/model.mlmodel")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: spec.path))
+        XCTAssertEqual(try manager.getMetadata(modelPath: packageURL.path).author, "Original")
+    }
+
+    func testOutputSameAsSourceIsRefusedThroughADifferentPathSpelling() throws {
+        let packageURL = try writeSyntheticMLPackage(named: "Spelled", metadata: [.author: "Original"])
+
+        // Same directory, reached via "." — must still be recognised as the source.
+        let indirect = packageURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(".")
+            .appendingPathComponent(packageURL.lastPathComponent)
+
+        XCTAssertThrowsError(try manager.setMetadata(
+            modelPath: packageURL.path,
+            field: .author,
+            value: "Jane",
+            outputPath: indirect.path
+        ))
+        XCTAssertEqual(try manager.getMetadata(modelPath: packageURL.path).author, "Original")
+    }
+
+    func testOutputInsideSourcePackageIsRefused() throws {
+        let packageURL = try writeSyntheticMLPackage(named: "Nested", metadata: [.author: "Original"])
+        let inside = packageURL.appendingPathComponent("copy.mlpackage")
+
+        XCTAssertThrowsError(try manager.setMetadata(
+            modelPath: packageURL.path,
+            field: .author,
+            value: "Jane",
+            outputPath: inside.path
+        )) { error in
+            guard case .outputInsideSource = (error as? MetadataError) else {
+                return XCTFail("Expected outputInsideSource, got \(error)")
+            }
+        }
+
+        // No staging debris left inside the package.
+        let contents = try FileManager.default.contentsOfDirectory(atPath: packageURL.path)
+        XCTAssertEqual(contents.sorted(), ["Data"])
+    }
+
+    func testExistingNonPackageDestinationIsNotDeleted() throws {
+        let packageURL = try writeSyntheticMLPackage(named: "Src", metadata: [.author: "Original"])
+
+        let precious = tempDirectory.appendingPathComponent("precious")
+        try FileManager.default.createDirectory(at: precious, withIntermediateDirectories: true)
+        let keepsake = precious.appendingPathComponent("data.txt")
+        try Data("keep me".utf8).write(to: keepsake)
+
+        XCTAssertThrowsError(try manager.setMetadata(
+            modelPath: packageURL.path,
+            field: .author,
+            value: "Jane",
+            outputPath: precious.path
+        )) { error in
+            guard case .outputExistsAndIsNotAPackage = (error as? MetadataError) else {
+                return XCTFail("Expected outputExistsAndIsNotAPackage, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(try String(contentsOf: keepsake, encoding: .utf8), "keep me")
+    }
+
+    func testPackageCloneLeavesNoStagingDirectory() throws {
+        let packageURL = try writeSyntheticMLPackage(named: "Origin", metadata: [.author: "Original"])
+        let outputURL = tempDirectory.appendingPathComponent("Cloned.mlpackage")
+
+        _ = try manager.setMetadata(
+            modelPath: packageURL.path,
+            field: .author,
+            value: "Jane Doe",
+            outputPath: outputURL.path
+        )
+
+        XCTAssertEqual(try manager.getMetadata(modelPath: outputURL.path).author, "Jane Doe")
+        XCTAssertEqual(try manager.getMetadata(modelPath: packageURL.path).author, "Original")
+
+        let leftovers = try FileManager.default
+            .contentsOfDirectory(atPath: tempDirectory.path)
+            .filter { $0.contains("staging") }
+        XCTAssertTrue(leftovers.isEmpty, "Staging directories should not survive: \(leftovers)")
+    }
+
+    func testReplacingAnExistingPackageDestinationSucceeds() throws {
+        let packageURL = try writeSyntheticMLPackage(named: "New", metadata: [.author: "Fresh"])
+        let existing = try writeSyntheticMLPackage(named: "Old", metadata: [.author: "Stale"])
+
+        _ = try manager.setMetadata(
+            modelPath: packageURL.path,
+            field: .author,
+            value: "Replaced",
+            outputPath: existing.path
+        )
+
+        XCTAssertEqual(try manager.getMetadata(modelPath: existing.path).author, "Replaced")
+    }
+
     private func writeSyntheticMLModel(
         named name: String,
         metadata: [ModelSpecEditor.MetadataFieldTag: String]

@@ -83,7 +83,13 @@ public class MetadataManager {
             isPackage: isPackage
         )
 
-        try updatedData.write(to: destination.specURL, options: .atomic)
+        do {
+            try updatedData.write(to: destination.specURL, options: .atomic)
+            try destination.commit()
+        } catch {
+            destination.discard()
+            throw error
+        }
         return destination.userVisiblePath
     }
 
@@ -101,36 +107,130 @@ public class MetadataManager {
         throw MetadataError.specNotFoundInPackage(path: packageURL.path)
     }
 
+    /// Where the modified spec bytes go, plus how to finish (or abandon) the write.
+    private struct WriteDestination {
+        let specURL: URL
+        let userVisiblePath: String
+        /// Move a staged package copy into its final place. No-op otherwise.
+        let commit: () throws -> Void
+        /// Clean up staged files when the write failed.
+        let discard: () -> Void
+    }
+
     /// Decide where the modified spec bytes should be written and (for packages with
-    /// `--output`) clone the package to the destination first.
+    /// `--output`) clone the package alongside the destination first.
     private func resolveOutputDestination(
         sourceModel: URL,
         sourceSpec: URL,
         outputPath: String?,
         isPackage: Bool
-    ) throws -> (specURL: URL, userVisiblePath: String) {
+    ) throws -> WriteDestination {
         guard let outputPath = outputPath else {
-            return (sourceSpec, sourceModel.path)
+            return WriteDestination(
+                specURL: sourceSpec,
+                userVisiblePath: sourceModel.path,
+                commit: {},
+                discard: {}
+            )
         }
 
-        let outputURL = URL(fileURLWithPath: outputPath)
+        let outputURL = canonical(URL(fileURLWithPath: outputPath))
+        let sourceURL = canonical(sourceModel)
 
         if !isPackage {
-            return (outputURL, outputURL.path)
+            return WriteDestination(
+                specURL: outputURL,
+                userVisiblePath: outputURL.path,
+                commit: {},
+                discard: {}
+            )
         }
 
-        // .mlpackage with --output: copy the whole package, then aim our write at the
-        // mirrored spec location inside the copy.
-        if fileManager.fileExists(atPath: outputURL.path) {
-            try fileManager.removeItem(at: outputURL)
+        // Writing a package means replacing a directory, so refuse the shapes where
+        // that would destroy the very model being edited.
+        guard outputURL != sourceURL else {
+            throw MetadataError.outputSameAsSource(path: outputURL.path)
         }
-        try fileManager.copyItem(at: sourceModel, to: outputURL)
+        guard !isDescendant(outputURL, of: sourceURL) else {
+            throw MetadataError.outputInsideSource(path: outputURL.path)
+        }
+        if fileManager.fileExists(atPath: outputURL.path) {
+            guard outputURL.pathExtension == "mlpackage" else {
+                throw MetadataError.outputExistsAndIsNotAPackage(path: outputURL.path)
+            }
+        }
+
+        // Clone to a sibling staging directory and only swap it into place once the
+        // spec has been written, so a failure part-way through leaves both the source
+        // and any existing destination untouched.
+        let stagingURL = try uniqueStagingURL(besides: outputURL)
+        do {
+            try fileManager.copyItem(at: sourceURL, to: stagingURL)
+        } catch {
+            // Never leave a half-copied package behind.
+            try? fileManager.removeItem(at: stagingURL)
+            throw error
+        }
 
         let relativeSpecComponents = relativePathComponents(of: sourceSpec, under: sourceModel)
-        let mirroredSpecURL = relativeSpecComponents.reduce(outputURL) {
+        let mirroredSpecURL = relativeSpecComponents.reduce(stagingURL) {
             $0.appendingPathComponent($1)
         }
-        return (mirroredSpecURL, outputURL.path)
+
+        let manager = fileManager
+        return WriteDestination(
+            specURL: mirroredSpecURL,
+            userVisiblePath: outputURL.path,
+            commit: {
+                if manager.fileExists(atPath: outputURL.path) {
+                    _ = try manager.replaceItemAt(outputURL, withItemAt: stagingURL)
+                } else {
+                    try manager.moveItem(at: stagingURL, to: outputURL)
+                }
+            },
+            discard: {
+                try? manager.removeItem(at: stagingURL)
+            }
+        )
+    }
+
+    /// A staging path next to the destination, so the final move stays on one volume.
+    private func uniqueStagingURL(besides outputURL: URL) throws -> URL {
+        let directory = outputURL.deletingLastPathComponent()
+        let base = ".\(outputURL.lastPathComponent).coreml-staging.\(ProcessInfo.processInfo.processIdentifier)"
+
+        for attempt in 0..<100 {
+            let candidate = directory.appendingPathComponent(attempt == 0 ? base : "\(base).\(attempt)")
+            if !fileManager.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        throw MetadataError.stagingPathUnavailable(path: directory.path)
+    }
+
+    /// Resolve symlinks as far as the path exists, so two spellings of the same
+    /// location — /tmp/x and /private/tmp/x on macOS — compare equal.
+    private func canonical(_ url: URL) -> URL {
+        let standardized = url.standardizedFileURL
+
+        var trailing: [String] = []
+        var candidate = standardized
+        while !fileManager.fileExists(atPath: candidate.path) {
+            let parent = candidate.deletingLastPathComponent()
+            // Stop at the root, or anywhere deleting a component makes no progress.
+            guard parent.path != candidate.path, parent.path != "/" || candidate.path == "/" else { break }
+            trailing.insert(candidate.lastPathComponent, at: 0)
+            candidate = parent
+        }
+
+        guard fileManager.fileExists(atPath: candidate.path) else { return standardized }
+        return trailing.reduce(candidate.resolvingSymlinksInPath()) { $0.appendingPathComponent($1) }
+    }
+
+    private func isDescendant(_ url: URL, of ancestor: URL) -> Bool {
+        let components = url.standardized.pathComponents
+        let ancestorComponents = ancestor.standardized.pathComponents
+        return components.count > ancestorComponents.count && components.starts(with: ancestorComponents)
     }
 
     private func relativePathComponents(of url: URL, under ancestor: URL) -> [String] {
@@ -156,6 +256,10 @@ public enum MetadataError: Error, LocalizedError, Equatable {
     case cannotModifyCompiled
     case unsupportedModelFormat(extension: String)
     case specNotFoundInPackage(path: String)
+    case outputSameAsSource(path: String)
+    case outputInsideSource(path: String)
+    case outputExistsAndIsNotAPackage(path: String)
+    case stagingPathUnavailable(path: String)
 
     public var errorDescription: String? {
         switch self {
@@ -167,6 +271,14 @@ public enum MetadataError: Error, LocalizedError, Equatable {
             return "Cannot write metadata for model format '.\(ext)'. Use .mlmodel or .mlpackage."
         case .specNotFoundInPackage(let path):
             return "Could not locate model.mlmodel inside package at: \(path)"
+        case .outputSameAsSource(let path):
+            return "--output is the same as the source model (\(path)). Omit --output to edit in place."
+        case .outputInsideSource(let path):
+            return "--output (\(path)) is inside the source model. Choose a destination outside it."
+        case .outputExistsAndIsNotAPackage(let path):
+            return "Refusing to replace \(path): it already exists and is not an .mlpackage."
+        case .stagingPathUnavailable(let path):
+            return "Could not create a temporary staging directory in: \(path)"
         }
     }
 }
