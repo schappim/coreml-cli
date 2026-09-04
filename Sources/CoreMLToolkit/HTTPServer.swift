@@ -81,10 +81,13 @@ public final class HTTPServer {
         guard let port = NWEndpoint.Port(rawValue: configuration.port) else {
             throw HTTPServerError.invalidPort(configuration.port)
         }
-        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
-            host: NWEndpoint.Host(configuration.host),
-            port: port
-        )
+        // A hostname (rather than a literal address) does not constrain the bind at
+        // all: Network.framework listens on the wildcard address and picks its own
+        // port. Insist on something we can actually pin down.
+        guard let boundHost = Self.bindAddress(for: configuration.host) else {
+            throw HTTPServerError.unresolvableHost(configuration.host)
+        }
+        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: boundHost, port: port)
 
         let listener: NWListener
         do {
@@ -125,7 +128,39 @@ public final class HTTPServer {
             throw HTTPServerError.bindFailed(host: configuration.host, port: configuration.port, underlying: error)
         }
 
-        boundPort = listener.port?.rawValue ?? configuration.port
+        let actualPort = listener.port?.rawValue ?? configuration.port
+        if configuration.port != 0 && actualPort != configuration.port {
+            listener.cancel()
+            throw HTTPServerError.portNotHonoured(requested: configuration.port, bound: actualPort)
+        }
+        boundPort = actualPort
+    }
+
+    /// Literal addresses only — `localhost` is accepted as a spelling of loopback.
+    public static func bindAddress(for host: String) -> NWEndpoint.Host? {
+        switch host.lowercased() {
+        case "localhost":
+            return .ipv4(.loopback)
+        case "":
+            return nil
+        default:
+            if let address = IPv4Address(host) { return .ipv4(address) }
+            if let address = IPv6Address(host) { return .ipv6(address) }
+            return nil
+        }
+    }
+
+    /// Whether binding this host keeps the server reachable only from this machine.
+    public static func isLoopback(host: String) -> Bool {
+        switch bindAddress(for: host) {
+        case .ipv4(let address):
+            // All of 127.0.0.0/8 is loopback; isLoopback only matches 127.0.0.1.
+            return address.rawValue.first == 127
+        case .ipv6(let address):
+            return address.isLoopback
+        default:
+            return false
+        }
     }
 
     /// Stop accepting connections and close the ones still open.
@@ -176,6 +211,8 @@ public final class HTTPServer {
 
 public enum HTTPServerError: Error, LocalizedError {
     case invalidPort(UInt16)
+    case unresolvableHost(String)
+    case portNotHonoured(requested: UInt16, bound: UInt16)
     case bindFailed(host: String, port: UInt16, underlying: Error)
     case bindTimedOut(host: String, port: UInt16)
 
@@ -183,6 +220,10 @@ public enum HTTPServerError: Error, LocalizedError {
         switch self {
         case .invalidPort(let port):
             return "Invalid port: \(port)"
+        case .unresolvableHost(let host):
+            return "Cannot bind '\(host)'. Use a literal address — 127.0.0.1 (this machine only), 0.0.0.0 (all interfaces), ::1, or a specific interface address."
+        case .portNotHonoured(let requested, let bound):
+            return "Asked for port \(requested) but the socket bound \(bound)"
         case .bindFailed(let host, let port, let underlying):
             return "Could not bind \(host):\(port) — \(underlying.localizedDescription)"
         case .bindTimedOut(let host, let port):

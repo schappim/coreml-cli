@@ -42,11 +42,17 @@ struct Serve: ParsableCommand {
         guard concurrency >= 1 else {
             throw ValidationError("Concurrency must be at least 1")
         }
-        guard maxBodyMb >= 1 else {
-            throw ValidationError("Max body size must be at least 1 MB")
+        // Bounded so the byte conversion below cannot overflow and trap.
+        guard (1...16384).contains(maxBodyMb) else {
+            throw ValidationError("Max body size must be between 1 and 16384 MB")
         }
         guard ComputeDevice(rawValue: device) != nil else {
             throw ValidationError("Invalid device '\(device)'. Use: cpu, gpu, ane, or all")
+        }
+        guard HTTPServer.bindAddress(for: host) != nil else {
+            throw ValidationError(
+                "Cannot bind '\(host)'. Use a literal address — 127.0.0.1 (this machine only), 0.0.0.0 (all interfaces), ::1, or a specific interface address."
+            )
         }
     }
 
@@ -112,7 +118,9 @@ struct Serve: ParsableCommand {
 
     private func printBanner(info: ModelInfo, port: UInt16) {
         let displayHost = (host == "0.0.0.0" || host == "::") ? "127.0.0.1" : host
-        let base = "http://\(displayHost):\(port)"
+        // An IPv6 literal has to be bracketed before it can go in a URL.
+        let urlHost = displayHost.contains(":") ? "[\(displayHost)]" : displayHost
+        let base = "http://\(urlHost):\(port)"
 
         print("coreml serve — \(info.name)")
         print()
@@ -132,7 +140,7 @@ struct Serve: ParsableCommand {
         print("  \(exampleRequest(info: info, base: base))")
         print()
 
-        if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+        if !HTTPServer.isLoopback(host: host) {
             let warning = apiKey == nil
                 ? "  Warning: bound to \(host) with no --api-key. Anyone who can reach this port can run the model.\n"
                 : "  Note: bound to \(host), reachable beyond this machine.\n"
@@ -172,7 +180,7 @@ struct Serve: ParsableCommand {
 }
 
 /// Serialised access log, so concurrent handlers cannot interleave lines.
-private final class RequestLog {
+final class RequestLog {
     private let enabled: Bool
     private let lock = NSLock()
 
@@ -180,9 +188,27 @@ private final class RequestLog {
         self.enabled = enabled
     }
 
+    /// The request line is attacker-controlled and lands in an operator's terminal,
+    /// so escape control characters — an unescaped ESC or newline can forge log
+    /// lines or drive the terminal.
+    static func escaped(_ text: String, limit: Int = 256) -> String {
+        var result = ""
+        for scalar in text.unicodeScalars.prefix(limit) {
+            if scalar.value < 0x20 || scalar.value == 0x7F {
+                result += String(format: "\\x%02x", scalar.value)
+            } else {
+                result.unicodeScalars.append(scalar)
+            }
+        }
+        if text.unicodeScalars.count > limit { result += "…" }
+        return result
+    }
+
     func record(request: HTTPRequest, status: Int, elapsedMs: Double) {
         guard enabled else { return }
-        let line = "\(request.method) \(request.path) \(status) \(String(format: "%.1f", elapsedMs))ms\n"
+        let method = Self.escaped(request.method)
+        let path = Self.escaped(request.path)
+        let line = "\(method) \(path) \(status) \(String(format: "%.1f", elapsedMs))ms\n"
         lock.lock()
         FileHandle.standardError.write(Data(line.utf8))
         lock.unlock()
