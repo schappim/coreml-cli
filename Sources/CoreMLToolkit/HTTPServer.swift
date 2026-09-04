@@ -24,6 +24,8 @@ public final class HTTPServer {
         public var maxConnections: Int
         /// Seconds a connection may sit idle before it is closed.
         public var idleTimeout: TimeInterval
+        /// Seconds a single request has to arrive in full, however slowly it trickles.
+        public var requestTimeout: TimeInterval
 
         public init(
             host: String = "127.0.0.1",
@@ -32,7 +34,8 @@ public final class HTTPServer {
             maxHeaderBytes: Int = 64 * 1024,
             maxConcurrentRequests: Int = 4,
             maxConnections: Int = 128,
-            idleTimeout: TimeInterval = 60
+            idleTimeout: TimeInterval = 60,
+            requestTimeout: TimeInterval = 300
         ) {
             self.host = host
             self.port = port
@@ -41,6 +44,7 @@ public final class HTTPServer {
             self.maxConcurrentRequests = max(1, maxConcurrentRequests)
             self.maxConnections = max(1, maxConnections)
             self.idleTimeout = idleTimeout
+            self.requestTimeout = requestTimeout
         }
     }
 
@@ -54,6 +58,7 @@ public final class HTTPServer {
 
     private var listener: NWListener?
     private var activeConnections: [ObjectIdentifier: Connection] = [:]
+    private var isStopped = false
 
     public init(configuration: Configuration = Configuration(), handler: @escaping Handler) {
         self.configuration = configuration
@@ -169,6 +174,7 @@ public final class HTTPServer {
         listener = nil
 
         lock.lock()
+        isStopped = true
         let open = Array(activeConnections.values)
         activeConnections.removeAll()
         lock.unlock()
@@ -196,9 +202,19 @@ public final class HTTPServer {
         // Registered either way: the table is what keeps the connection alive
         // long enough to finish writing, even when it is being turned away.
         lock.lock()
+        let stopped = isStopped
         let atCapacity = activeConnections.count >= configuration.maxConnections
-        activeConnections[ObjectIdentifier(connection)] = connection
+        if !stopped {
+            activeConnections[ObjectIdentifier(connection)] = connection
+        }
         lock.unlock()
+
+        // A connection accepted while stop() was running would otherwise be
+        // registered after the table was emptied, and never closed.
+        if stopped {
+            nwConnection.cancel()
+            return
+        }
 
         if atCapacity {
             connection.rejectAndClose(status: 503, message: "Server is at its connection limit")
@@ -242,7 +258,10 @@ private final class Connection {
     private let queue: DispatchQueue
     private let parser: HTTPRequestParser
 
-    private var idleTimer: DispatchWorkItem?
+    private var timer: DispatchSourceTimer?
+    private var lastActivity: DispatchTime = .now()
+    private var requestStartedAt: DispatchTime?
+    private var isHandling = false
     private var isClosed = false
 
     var onClose: ((Connection) -> Void)?
@@ -282,7 +301,7 @@ private final class Connection {
         }
 
         connection.start(queue: queue)
-        resetIdleTimer()
+        startTimer()
         receive()
     }
 
@@ -299,8 +318,8 @@ private final class Connection {
         queue.async { [weak self] in
             guard let self, !self.isClosed else { return }
             self.isClosed = true
-            self.idleTimer?.cancel()
-            self.idleTimer = nil
+            self.timer?.cancel()
+            self.timer = nil
             self.connection.cancel()
             self.onClose?(self)
         }
@@ -316,7 +335,7 @@ private final class Connection {
             }
 
             if let data, !data.isEmpty {
-                self.resetIdleTimer()
+                self.noteActivity()
                 self.parser.append(data)
                 self.drain()
                 return
@@ -344,6 +363,7 @@ private final class Connection {
             }
 
         case .request(let request):
+            beginHandling()
             workQueue.addOperation { [weak self] in
                 guard let self else { return }
 
@@ -356,8 +376,8 @@ private final class Connection {
 
                 self.send(payload) { [weak self] in
                     guard let self else { return }
+                    self.endHandling()
                     if keepAlive {
-                        self.resetIdleTimer()
                         self.queue.async { self.drain() }
                     } else {
                         self.close()
@@ -377,16 +397,81 @@ private final class Connection {
         })
     }
 
-    private func resetIdleTimer() {
+    /// One timer per connection, rescheduled as things happen. The previous
+    /// approach queued a fresh work item on every read, each of which stayed
+    /// resident until its original deadline passed.
+    private func startTimer() {
         queue.async { [weak self] in
             guard let self, !self.isClosed else { return }
-            self.idleTimer?.cancel()
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.setEventHandler { [weak self] in self?.handleTimeout() }
+            self.timer = timer
+            timer.resume()
+            self.reschedule()
+        }
+    }
 
-            let timer = DispatchWorkItem { [weak self] in
+    private func noteActivity() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.lastActivity = .now()
+            // The clock on a whole request starts at its first byte.
+            if self.requestStartedAt == nil { self.requestStartedAt = .now() }
+            self.reschedule()
+        }
+    }
+
+    private func beginHandling() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.isHandling = true
+            self.reschedule()
+        }
+    }
+
+    private func endHandling() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.isHandling = false
+            self.requestStartedAt = nil
+            self.lastActivity = .now()
+            self.reschedule()
+        }
+    }
+
+    private func reschedule() {
+        guard let timer, !isClosed else { return }
+
+        // While the model is running there is nothing to time out: the client is
+        // waiting on us, not the other way round. Cutting the connection here
+        // would throw away a response that is still being computed.
+        guard !isHandling else {
+            timer.schedule(deadline: .distantFuture)
+            return
+        }
+
+        let idleDeadline = lastActivity + configuration.idleTimeout
+        guard let requestStartedAt else {
+            timer.schedule(deadline: idleDeadline)
+            return
+        }
+
+        let requestDeadline = requestStartedAt + configuration.requestTimeout
+        timer.schedule(deadline: min(idleDeadline, requestDeadline))
+    }
+
+    private func handleTimeout() {
+        guard !isClosed else { return }
+
+        // A request that was still arriving gets told why it was dropped; an idle
+        // connection has nothing outstanding to answer.
+        if requestStartedAt != nil {
+            let response = HTTPResponse.error(status: 408, message: "Request timed out")
+            send(response.serialize(keepAlive: false)) { [weak self] in
                 self?.close()
             }
-            self.idleTimer = timer
-            self.queue.asyncAfter(deadline: .now() + self.configuration.idleTimeout, execute: timer)
+            return
         }
+        close()
     }
 }

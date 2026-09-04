@@ -60,6 +60,9 @@ public final class HTTPRequestParser {
     private let limits: Limits
     private var buffer: [UInt8] = []
     private var readOffset = 0
+    /// Where the next delimiter search resumes. Without it every read rescans the
+    /// whole buffered head, which is quadratic against a client sending byte by byte.
+    private var scanCursor = 0
     private var state: State = .head
     private var pendingHead: HTTPRequest?
     private var pendingBody = Data()
@@ -97,7 +100,7 @@ public final class HTTPRequestParser {
                 }
 
                 let headBytes = Array(buffer[readOffset..<headerEnd])
-                readOffset = headerEnd + 4
+                advanceRead(to: headerEnd + 4)
 
                 switch parseHead(headBytes) {
                 case .failure(let status, let message):
@@ -130,7 +133,7 @@ public final class HTTPRequestParser {
                 let take = min(remaining, available)
                 if take > 0 {
                     pendingBody.append(contentsOf: buffer[readOffset..<(readOffset + take)])
-                    readOffset += take
+                    advanceRead(to: readOffset + take)
                 }
                 if take == remaining {
                     return emitRequest()
@@ -148,7 +151,7 @@ public final class HTTPRequestParser {
                     return .needMoreData
                 }
                 let line = String(decoding: buffer[readOffset..<lineEnd], as: UTF8.self)
-                readOffset = lineEnd + 2
+                advanceRead(to: lineEnd + 2)
 
                 let sizeText = line.split(separator: ";", maxSplits: 1).first.map(String.init) ?? ""
                 guard let size = Int(sizeText.trimmingCharacters(in: .whitespaces), radix: 16), size >= 0 else {
@@ -165,7 +168,7 @@ public final class HTTPRequestParser {
                 let take = min(remaining, available)
                 if take > 0 {
                     pendingBody.append(contentsOf: buffer[readOffset..<(readOffset + take)])
-                    readOffset += take
+                    advanceRead(to: readOffset + take)
                 }
                 if take == remaining {
                     state = .chunkTerminator
@@ -183,7 +186,7 @@ public final class HTTPRequestParser {
                 guard buffer[readOffset] == 0x0D, buffer[readOffset + 1] == 0x0A else {
                     return fail(status: 400, message: "Malformed chunked encoding")
                 }
-                readOffset += 2
+                advanceRead(to: readOffset + 2)
                 state = .chunkSize
 
             case .trailers:
@@ -195,7 +198,7 @@ public final class HTTPRequestParser {
                     return .needMoreData
                 }
                 let isBlank = lineEnd == readOffset
-                readOffset = lineEnd + 2
+                advanceRead(to: lineEnd + 2)
                 if isBlank {
                     return emitRequest()
                 }
@@ -358,19 +361,27 @@ public final class HTTPRequestParser {
 
     private var available: Int { buffer.count - readOffset }
 
+    /// Consume up to `offset`, and restart delimiter scanning from there.
+    private func advanceRead(to offset: Int) {
+        readOffset = offset
+        scanCursor = offset
+    }
+
     private func indexOfCRLF(from start: Int) -> Int? {
         guard buffer.count >= 2 else { return nil }
-        var index = start
+        var index = max(start, scanCursor)
         while index + 1 < buffer.count {
             if buffer[index] == 0x0D && buffer[index + 1] == 0x0A { return index }
             index += 1
         }
+        // Everything before the final byte is settled; only it could start a CRLF.
+        scanCursor = max(start, buffer.count - 1)
         return nil
     }
 
     private func indexOfHeaderTerminator() -> Int? {
         guard buffer.count >= 4 else { return nil }
-        var index = readOffset
+        var index = max(readOffset, scanCursor)
         while index + 3 < buffer.count {
             if buffer[index] == 0x0D, buffer[index + 1] == 0x0A,
                buffer[index + 2] == 0x0D, buffer[index + 3] == 0x0A {
@@ -378,6 +389,8 @@ public final class HTTPRequestParser {
             }
             index += 1
         }
+        // A terminator can still straddle the last three bytes and the next read.
+        scanCursor = max(readOffset, buffer.count - 3)
         return nil
     }
 
@@ -385,9 +398,11 @@ public final class HTTPRequestParser {
         guard readOffset > 0 else { return }
         if readOffset == buffer.count {
             buffer.removeAll(keepingCapacity: true)
+            scanCursor = 0
             readOffset = 0
         } else if readOffset > 64 * 1024 {
             buffer.removeFirst(readOffset)
+            scanCursor = max(0, scanCursor - readOffset)
             readOffset = 0
         }
     }
@@ -407,6 +422,7 @@ public final class HTTPRequestParser {
         pendingHead = nil
         pendingBody = Data()
         state = .head
+        scanCursor = readOffset
         compactIfNeeded()
         return .request(request)
     }
