@@ -250,6 +250,45 @@ final class InferenceServiceTests: XCTestCase {
         XCTAssertEqual(body["inferenceTimeMs"] as? Double, 1.5)
     }
 
+    func testNonFiniteOutputsDoNotCrashTheEncoder() throws {
+        // JSONSerialization raises an uncatchable ObjC exception on NaN/Inf, so a
+        // model emitting one used to abort the whole server process.
+        let engine = FakeEngine(outputs: [
+            "score": .double(.nan),
+            "embedding": .array([1.0, .infinity, -.infinity, 2.0]),
+            "probs": .dictionary(["a": .nan, "b": 0.5])
+        ])
+        let service = makeService(engine: engine)
+
+        let response = service.handle(post(Data("[1]".utf8), contentType: "application/json"))
+        XCTAssertEqual(response.status, 200)
+
+        let outputs = try XCTUnwrap(try json(response)["outputs"] as? [String: Any])
+        XCTAssertTrue(outputs["score"] is NSNull)
+
+        let embedding = try XCTUnwrap(outputs["embedding"] as? [Any])
+        XCTAssertEqual(embedding.count, 4)
+        XCTAssertEqual(embedding[0] as? Double, 1.0)
+        XCTAssertTrue(embedding[1] is NSNull)
+        XCTAssertTrue(embedding[2] is NSNull)
+
+        let probs = try XCTUnwrap(outputs["probs"] as? [String: Any])
+        XCTAssertTrue(probs["a"] is NSNull)
+        XCTAssertEqual(probs["b"] as? Double, 0.5)
+    }
+
+    func testNonFiniteRankedScoresAreAlsoSafe() throws {
+        let engine = FakeEngine(outputs: ["probs": .dictionary(["a": .infinity, "b": 0.5])])
+        let service = makeService(engine: engine)
+
+        let response = service.handle(post(Data("[1]".utf8), contentType: "application/json", query: ["top": "2"]))
+        XCTAssertEqual(response.status, 200)
+
+        let ranked = try XCTUnwrap(try json(response)["ranked"] as? [String: Any])
+        let entries = try XCTUnwrap(ranked["probs"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, 2)
+    }
+
     // MARK: - Error mapping
 
     func testShapeMismatchBecomes422() throws {

@@ -167,6 +167,48 @@ final class HTTPRequestParserTests: XCTestCase {
         XCTAssertEqual(status, 413)
     }
 
+    func testHugeChunkSizeIsRejectedWithoutOverflowing() {
+        // A chunk size near Int.max, arriving after a non-empty body, used to
+        // overflow the limit check and trap — killing the whole server process.
+        let raw = "POST /p HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+            + "1\r\nA\r\n"
+            + "7fffffffffffffff\r\n"
+        let outcomes = parseAll(raw)
+        guard case .failure(let status, _) = outcomes.last else {
+            return XCTFail("Expected a failure")
+        }
+        XCTAssertEqual(status, 413)
+    }
+
+    func testHugeChunkSizeAsFirstChunkIsAlsoRejected() {
+        let raw = "POST /p HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n7fffffffffffffff\r\n"
+        guard case .failure(let status, _) = parseAll(raw).last else {
+            return XCTFail("Expected a failure")
+        }
+        XCTAssertEqual(status, 413)
+    }
+
+    func testUnparseableChunkSizeIsRejected() {
+        let raw = "POST /p HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffffff\r\n"
+        guard case .failure(let status, _) = parseAll(raw).last else {
+            return XCTFail("Expected a failure")
+        }
+        XCTAssertEqual(status, 400)
+    }
+
+    func testOversizedBodyIsNotInvitedWith100Continue() {
+        let parser = HTTPRequestParser(limits: .init(maxHeaderBytes: 8 * 1024, maxBodyBytes: 16))
+        var invited = false
+        parser.onHeadReceived = { _ in invited = true }
+        parser.append(Array("POST /p HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 999999\r\n\r\n".utf8))
+
+        guard case .failure(let status, _) = parser.next() else {
+            return XCTFail("Expected a failure")
+        }
+        XCTAssertEqual(status, 413)
+        XCTAssertFalse(invited, "A request already destined for 413 must not be told to continue")
+    }
+
     func testRejectsOversizedHeaders() {
         let limits = HTTPRequestParser.Limits(maxHeaderBytes: 64, maxBodyBytes: 1024)
         let padding = String(repeating: "x", count: 400)

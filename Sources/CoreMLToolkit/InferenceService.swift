@@ -234,19 +234,19 @@ public final class InferenceService {
             case .string(let string):
                 outputs[name] = string
             case .double(let double):
-                outputs[name] = double
+                outputs[name] = Self.jsonSafe(double)
             case .int(let int):
                 outputs[name] = int
             case .array(let array):
-                outputs[name] = array
+                outputs[name] = array.map(Self.jsonSafe)
             case .dictionary(let dictionary):
                 let sorted = dictionary.sorted { lhs, rhs in
                     lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
                 }
                 let limited = top.map { Array(sorted.prefix($0)) } ?? sorted
-                outputs[name] = Dictionary(uniqueKeysWithValues: limited)
+                outputs[name] = Dictionary(uniqueKeysWithValues: limited.map { ($0.key, Self.jsonSafe($0.value)) })
                 // JSON objects have no order, so ranked results get an array too.
-                ranked[name] = limited.map { ["label": $0.key, "score": $0.value] }
+                ranked[name] = limited.map { ["label": $0.key, "score": Self.jsonSafe($0.value)] }
             }
         }
 
@@ -274,11 +274,21 @@ public final class InferenceService {
         }
     }
 
+    /// JSON has no NaN or infinity, and JSONSerialization answers one by raising an
+    /// Objective-C exception — which Swift cannot catch, so it takes the process
+    /// down rather than failing the request. Models do emit them, so replace any
+    /// non-finite value with null before it reaches the encoder.
+    static func jsonSafe(_ value: Double) -> Any {
+        value.isFinite ? value : NSNull()
+    }
+
     private func jsonResponse(_ payload: [String: Any], status: Int = 200) -> HTTPResponse {
-        guard let data = try? JSONSerialization.data(
-            withJSONObject: payload,
-            options: [.prettyPrinted, .sortedKeys]
-        ) else {
+        // Belt and braces: isValidJSONObject is the check that does not throw.
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(
+                  withJSONObject: payload,
+                  options: [.prettyPrinted, .sortedKeys]
+              ) else {
             return .error(status: 500, message: "Failed to encode response")
         }
         return .json(data, status: status)

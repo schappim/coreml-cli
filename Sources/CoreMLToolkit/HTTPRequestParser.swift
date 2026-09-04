@@ -105,19 +105,23 @@ public final class HTTPRequestParser {
                 case .success(let head, let framing):
                     pendingHead = head
                     pendingBody = Data()
-                    onHeadReceived?(head)
 
                     switch framing {
                     case .none:
                         return emitRequest()
                     case .fixed(let length):
+                        // Decide on the size before answering Expect: 100-continue,
+                        // so a request already destined for 413 is never invited to
+                        // send its body (RFC 9110 10.1.1).
                         if length > limits.maxBodyBytes {
                             return fail(status: 413, message: "Request body exceeds the \(limits.maxBodyBytes) byte limit")
                         }
                         if length == 0 { return emitRequest() }
-                        pendingBody.reserveCapacity(length)
+                        onHeadReceived?(head)
+                        pendingBody.reserveCapacity(min(length, 1024 * 1024))
                         state = .fixedBody(remaining: length)
                     case .chunked:
+                        onHeadReceived?(head)
                         state = .chunkSize
                     }
                 }
@@ -150,7 +154,9 @@ public final class HTTPRequestParser {
                 guard let size = Int(sizeText.trimmingCharacters(in: .whitespaces), radix: 16), size >= 0 else {
                     return fail(status: 400, message: "Malformed chunk size")
                 }
-                if pendingBody.count + size > limits.maxBodyBytes {
+                // Subtract rather than add: a chunk size near Int.max would
+                // overflow the addition, and Swift traps on that.
+                guard size <= limits.maxBodyBytes - pendingBody.count else {
                     return fail(status: 413, message: "Request body exceeds the \(limits.maxBodyBytes) byte limit")
                 }
                 state = size == 0 ? .trailers : .chunkData(remaining: size)
