@@ -46,7 +46,7 @@ sudo cp .build/release/coreml /usr/local/bin/
 
 ```bash
 coreml --version
-# coreml 1.1.0
+# 1.1.0
 ```
 
 ## Usage
