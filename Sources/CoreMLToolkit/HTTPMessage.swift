@@ -179,6 +179,7 @@ public struct HTTPResponse {
         case 500: return "Internal Server Error"
         case 501: return "Not Implemented"
         case 503: return "Service Unavailable"
+        case 505: return "HTTP Version Not Supported"
         default: return status < 400 ? "OK" : "Error"
         }
     }
