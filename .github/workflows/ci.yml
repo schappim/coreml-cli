@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build
+        run: swift build -v
+
+      - name: Test
+        run: swift test
+
+      - name: Build release binary
+        run: swift build -c release
+
+      - name: Smoke test CLI
+        run: .build/release/coreml --version
