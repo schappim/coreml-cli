@@ -391,7 +391,7 @@ public class ModelPredictor {
         let shape = constraint.shape.map { $0.intValue }
         let multiArray = try MLMultiArray(shape: shape as [NSNumber], dataType: constraint.dataType)
 
-        let flatValues = flattenArray(jsonArray)
+        let flatValues = try flattenArray(jsonArray)
         guard flatValues.count == multiArray.count else {
             throw PredictorError.shapeMismatch(
                 expected: multiArray.count,
@@ -437,13 +437,22 @@ public class ModelPredictor {
         return Int32(rounded)
     }
 
-    private func flattenArray(_ array: [Any]) -> [Double] {
+    /// Flatten a (possibly nested) JSON array of numbers.
+    ///
+    /// Anything that is not a number is an error rather than something to skip:
+    /// dropping it would shrink the element count, and a value dropped from the
+    /// middle silently shifts every value after it into the wrong position.
+    private func flattenArray(_ array: [Any]) throws -> [Double] {
         var result: [Double] = []
         for element in array {
             if let nested = element as? [Any] {
-                result.append(contentsOf: flattenArray(nested))
-            } else if let num = element as? NSNumber {
-                result.append(num.doubleValue)
+                result.append(contentsOf: try flattenArray(nested))
+            } else if let number = element as? NSNumber {
+                result.append(number.doubleValue)
+            } else {
+                throw PredictorError.nonNumericTensorValue(
+                    found: String(describing: type(of: element))
+                )
             }
         }
         return result
@@ -504,6 +513,7 @@ public enum PredictorError: Error, LocalizedError {
     case missingInput(name: String, known: [String])
     case unknownInput(name: String, known: [String])
     case invalidInputValue(name: String, expected: String)
+    case nonNumericTensorValue(found: String)
 
     public var errorDescription: String? {
         switch self {
@@ -534,6 +544,8 @@ public enum PredictorError: Error, LocalizedError {
             return "Unknown model input '\(name)'. Model inputs: \(known.joined(separator: ", "))"
         case .invalidInputValue(let name, let expected):
             return "Input '\(name)' expects \(expected)"
+        case .nonNumericTensorValue(let found):
+            return "Tensor input must contain only numbers, found \(found)"
         }
     }
 }

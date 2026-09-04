@@ -248,6 +248,15 @@ curl -X POST -H "X-API-Key: $COREML_API_KEY" \
 The key is accepted as either `X-API-Key` or `Authorization: Bearer`. Pass
 `--cors` to allow calls from a browser page.
 
+On a loopback bind the server only answers requests whose `Host` is a literal IP
+address or `localhost`, so a web page that points a domain it controls at
+`127.0.0.1` (DNS rebinding) cannot drive your model. If you reach a
+loopback-bound server through a name in `/etc/hosts`, list it:
+
+```bash
+coreml serve MobileNetV2.mlmodel --allowed-host myapp.local
+```
+
 #### Options
 
 | Option | Default | Description |
@@ -259,6 +268,7 @@ The key is accepted as either `X-API-Key` or `Authorization: Bearer`. Pass
 | `--max-body-mb` | `32` | Largest request body accepted |
 | `--api-key` | none | Require this key on every request |
 | `--cors` | off | Send CORS headers for browser clients |
+| `--allowed-host` | none | Extra hostname to accept in the `Host` header (repeatable) |
 | `--quiet`, `-q` | off | Do not log requests |
 
 ### Batch Processing

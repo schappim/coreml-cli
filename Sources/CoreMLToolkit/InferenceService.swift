@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 /// The prediction surface the HTTP layer needs, so routing can be tested
 /// without loading a real Core ML model.
@@ -24,10 +25,18 @@ public final class InferenceService {
         public var apiKey: String?
         /// Answer preflights and add `Access-Control-Allow-*` headers.
         public var allowCORS: Bool
+        /// Host header names to accept, alongside any literal IP address.
+        /// `nil` accepts any Host.
+        public var allowedHostNames: Set<String>?
 
-        public init(apiKey: String? = nil, allowCORS: Bool = false) {
+        public init(
+            apiKey: String? = nil,
+            allowCORS: Bool = false,
+            allowedHostNames: Set<String>? = nil
+        ) {
             self.apiKey = apiKey
             self.allowCORS = allowCORS
+            self.allowedHostNames = allowedHostNames
         }
     }
 
@@ -54,6 +63,10 @@ public final class InferenceService {
     /// Handle one request. Never throws: every failure becomes a response.
     public func handle(_ request: HTTPRequest) -> HTTPResponse {
         record { $0.requests += 1 }
+
+        if let denial = hostFailure(for: request) {
+            return finish(denial, for: request)
+        }
 
         if request.method == "OPTIONS" && configuration.allowCORS {
             return decorate(HTTPResponse(status: 204), for: request)
@@ -200,8 +213,9 @@ public final class InferenceService {
             throw InferenceRequestError(status: 400, message: "Body must be a JSON object or array")
         }
 
-        // { "inputs": { "<name>": <value> } }
-        if let inputs = object["inputs"] {
+        // { "inputs": { "<name>": <value> } } — unless the model really has an
+        // input called "inputs", in which case the object is already keyed by name.
+        if let inputs = object["inputs"], !inputNames.contains("inputs") {
             guard let named = inputs as? [String: Any] else {
                 throw InferenceRequestError(status: 400, message: "\"inputs\" must be an object keyed by input name")
             }
@@ -209,7 +223,7 @@ public final class InferenceService {
         }
 
         // { "input": <value> } for a single-input model.
-        if let value = object["input"] {
+        if let value = object["input"], !inputNames.contains("input") {
             guard inputNames.count == 1, let name = inputNames.first else {
                 throw InferenceRequestError(
                     status: 400,
@@ -269,7 +283,8 @@ public final class InferenceService {
             return 500
         case .missingImageConstraint, .missingMultiArrayConstraint, .unsupportedInputType:
             return 501
-        case .invalidImage, .invalidInputFormat, .shapeMismatch, .missingInput, .unknownInput, .invalidInputValue:
+        case .invalidImage, .invalidInputFormat, .shapeMismatch, .missingInput, .unknownInput,
+             .invalidInputValue, .nonNumericTensorValue:
             return 422
         }
     }
@@ -295,6 +310,45 @@ public final class InferenceService {
     }
 
     // MARK: - Auth, CORS, stats
+
+    /// Reject a Host the server was not reached by.
+    ///
+    /// A page in someone's browser can point a domain it controls at 127.0.0.1
+    /// (DNS rebinding) and drive a loopback-bound server from a remote origin.
+    /// Requiring the Host to be a literal address — or a name the operator listed —
+    /// closes that, since the attack depends on a domain name.
+    private func hostFailure(for request: HTTPRequest) -> HTTPResponse? {
+        guard let allowed = configuration.allowedHostNames else { return nil }
+
+        guard let raw = request.header("host"), !raw.isEmpty else {
+            return .error(status: 400, message: "Missing Host header")
+        }
+
+        let name = Self.hostName(from: raw)
+        if IPv4Address(name) != nil || IPv6Address(name) != nil { return nil }
+        if allowed.contains(name) { return nil }
+
+        return .error(
+            status: 421,
+            message: "Host '\(name)' is not served here. Reach the server by IP address, or pass --allowed-host \(name)."
+        )
+    }
+
+    /// Strip the port and any IPv6 brackets from a Host header value.
+    static func hostName(from header: String) -> String {
+        var value = header.trimmingCharacters(in: .whitespaces).lowercased()
+
+        if value.hasPrefix("[") {
+            guard let end = value.firstIndex(of: "]") else { return value }
+            return String(value[value.index(after: value.startIndex)..<end])
+        }
+
+        // A bare IPv6 literal has several colons; only strip a single trailing port.
+        if value.filter({ $0 == ":" }).count == 1, let colon = value.lastIndex(of: ":") {
+            value = String(value[value.startIndex..<colon])
+        }
+        return value
+    }
 
     private func authorizationFailure(for request: HTTPRequest) -> HTTPResponse? {
         guard let expected = configuration.apiKey, !expected.isEmpty else { return nil }

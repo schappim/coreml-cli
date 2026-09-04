@@ -330,6 +330,75 @@ final class InferenceServiceTests: XCTestCase {
         XCTAssertEqual(body["errors"] as? Int, 1)
     }
 
+    // MARK: - Host policy
+
+    private func hostChecked() -> InferenceService {
+        makeService(configuration: .init(allowedHostNames: ["localhost"]))
+    }
+
+    func testLiteralAddressHostsAreAccepted() {
+        let service = hostChecked()
+        for host in ["127.0.0.1:8080", "127.0.0.1", "[::1]:8080", "192.168.1.4:8080"] {
+            let request = HTTPRequest(method: "GET", path: "/health", headers: ["host": host])
+            XCTAssertEqual(service.handle(request).status, 200, "Expected \(host) to be served")
+        }
+    }
+
+    func testAllowedNameIsAccepted() {
+        let request = HTTPRequest(method: "GET", path: "/health", headers: ["host": "localhost:8080"])
+        XCTAssertEqual(hostChecked().handle(request).status, 200)
+    }
+
+    func testRebindingDomainIsRejected() {
+        // A page on evil.example that points its own domain at 127.0.0.1.
+        let request = HTTPRequest(method: "GET", path: "/health", headers: ["host": "evil.example:8080"])
+        XCTAssertEqual(hostChecked().handle(request).status, 421)
+    }
+
+    func testMissingHostIsRejectedWhenCheckingIsOn() {
+        XCTAssertEqual(hostChecked().handle(HTTPRequest(method: "GET", path: "/health")).status, 400)
+    }
+
+    func testHostIsNotCheckedByDefault() {
+        let request = HTTPRequest(method: "GET", path: "/health", headers: ["host": "anything.example"])
+        XCTAssertEqual(makeService().handle(request).status, 200)
+    }
+
+    func testHostCheckRunsBeforeCORSPreflight() {
+        let service = makeService(configuration: .init(allowCORS: true, allowedHostNames: ["localhost"]))
+        let request = HTTPRequest(method: "OPTIONS", path: "/v1/predict", headers: ["host": "evil.example"])
+        XCTAssertEqual(service.handle(request).status, 421)
+    }
+
+    func testHostNameParsing() {
+        XCTAssertEqual(InferenceService.hostName(from: "127.0.0.1:8080"), "127.0.0.1")
+        XCTAssertEqual(InferenceService.hostName(from: "[::1]:8080"), "::1")
+        XCTAssertEqual(InferenceService.hostName(from: "[fe80::1]"), "fe80::1")
+        XCTAssertEqual(InferenceService.hostName(from: "LocalHost:8080"), "localhost")
+        XCTAssertEqual(InferenceService.hostName(from: "example.com"), "example.com")
+    }
+
+    // MARK: - Shorthand keys
+
+    func testInputNamedInputIsNotShadowedByTheShorthand() throws {
+        // A model whose input is genuinely called "input".
+        let engine = FakeEngine(inputNames: ["input"])
+        let service = makeService(engine: engine)
+
+        let response = service.handle(post(Data(#"{"input": "hello"}"#.utf8), contentType: "application/json"))
+        XCTAssertEqual(response.status, 200)
+        XCTAssertEqual(engine.receivedNamedValues?["input"] as? String, "hello")
+    }
+
+    func testInputNamedInputsIsNotShadowedByTheShorthand() throws {
+        let engine = FakeEngine(inputNames: ["inputs"])
+        let service = makeService(engine: engine)
+
+        let response = service.handle(post(Data(#"{"inputs": "hello"}"#.utf8), contentType: "application/json"))
+        XCTAssertEqual(response.status, 200)
+        XCTAssertEqual(engine.receivedNamedValues?["inputs"] as? String, "hello")
+    }
+
     // MARK: - Auth and CORS
 
     func testApiKeyIsRequiredWhenConfigured() {

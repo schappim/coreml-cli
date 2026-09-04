@@ -174,6 +174,7 @@ public struct HTTPResponse {
         case 413: return "Content Too Large"
         case 415: return "Unsupported Media Type"
         case 422: return "Unprocessable Content"
+        case 421: return "Misdirected Request"
         case 429: return "Too Many Requests"
         case 431: return "Request Header Fields Too Large"
         case 500: return "Internal Server Error"

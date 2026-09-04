@@ -32,6 +32,9 @@ struct Serve: ParsableCommand {
     @Flag(name: .long, help: "Send CORS headers so browsers can call the API")
     var cors: Bool = false
 
+    @Option(name: .long, parsing: .singleValue, help: "Extra hostname to accept in the Host header (repeatable)")
+    var allowedHost: [String] = []
+
     @Flag(name: .shortAndLong, help: "Do not log requests")
     var quiet: Bool = false
 
@@ -66,10 +69,21 @@ struct Serve: ParsableCommand {
         let predictor = ModelPredictor(device: computeDevice)
         try predictor.loadModel(at: modelPath)
 
+        // On a loopback bind, only literal addresses and known names are served, so a
+        // page that resolves its own domain to 127.0.0.1 cannot drive this server.
+        // A wider bind is reached by whatever name the operator chose, so leave it open.
+        let allowedHostNames: Set<String>? = HTTPServer.isLoopback(host: host)
+            ? Set(["localhost"] + allowedHost.map { $0.lowercased() })
+            : nil
+
         let service = InferenceService(
             engine: predictor,
             modelInfo: info,
-            configuration: .init(apiKey: apiKey, allowCORS: cors)
+            configuration: .init(
+                apiKey: apiKey,
+                allowCORS: cors,
+                allowedHostNames: allowedHostNames
+            )
         )
 
         let log = RequestLog(enabled: !quiet)
