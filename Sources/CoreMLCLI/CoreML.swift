@@ -12,7 +12,8 @@ struct CoreML: AsyncParsableCommand {
             Batch.self,
             Benchmark.self,
             Compile.self,
-            Meta.self
+            Meta.self,
+            Serve.self
         ],
         defaultSubcommand: nil
     )
